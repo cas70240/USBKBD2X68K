@@ -11,27 +11,6 @@
 //  ・USB_Host_Shield_2.0 (https://github.com/felis/USB_Host_Shield_2.0)
 //  ・MsTimer2 (http://playground.arduino.cc/Main/MsTimer2)
 //----------------------------------------------------------------------
-// キーアサイン
-//  ・F11      -> かな(0x5a)
-//  ・F12      -> ローマ字(0x5b)
-//  ・LeftWin  -> ひらがな(0x5f)
-//  ・LeftAlt  -> XF1(0x55)
-//  ・無変換    -> XF2(0x56)
-//  ・変換      -> XF3(0x57)
-//  ・カタカナ   -> XF4(0x58)
-//  ・RightAlt  -> XF5(0x59)
-//  ・RgihtWin  -> N/A
-//  ・Menu      -> OPT.1(0x72)
-//  ・RightCtrl -> OPT.2(0x73)
-//  ・END       -> UNDO(0x3a)
-//  ・ScrollLock-> HELP(0x54)
-//  ・Pause     -> BREAK(0x61)
-//  ・PrintScr  -> COPY(0x62)
-//  ・NumLock   -> CLR(0x3f)
-//  ・Num /     -> 記号入力(0x52)
-//  ・Num *     -> 登録(0x53)
-//  ・Num -     -> コード入力(0x5c)
-//----------------------------------------------------------------------
 // キーボードコネクタ配線(本体側)
 //
 //   7 6 5
@@ -41,32 +20,35 @@
 //  本体側             Arduino側
 //  -------------------------------------------
 //  1:Vcc2 5V(out) -> 5V
-//  2:MSDATA(in)   <- TX(1)
-//  3:KEYRxD(in)   <- A0(14) softwareSerial TX 
-//  4:KEYTxD(out)  -> A1(15) softwareSerial RX
-//  5:READY(out)
+//  2:MSDATA(in)   <- A0(14) softwareSerial TX
+//  3:KEYRxD(in)   <- D1(1) Serial TX 
+//  4:KEYTxD(out)  -> D0(0) Serial RX
+//  5:READY(out)   -> D7(7)
 //  6:REMOTE(in)
 //  7:GND(--)      -- GND
-//
-// mouse control
-//  mouse          -- D2(2)/A2(16)
 //----------------------------------------------------------------------
 
 #define MYDEBUG      0
 
-#include <BTHID.h>
+#include <EEPROM.h>
+//#include <BTHID.h>
 #include <hidboot.h>
 #include <usbhub.h>
 #include <MsTimer2.h>
 #include <SoftwareSerial.h>
-#include "keymap.h"
 
-#define KBD_TX      14    //KeyBoard TX
-#define KBD_RX      15    //KeyBoard RX
-#define MOUSE_OFF   2    //Mouse Disable      D2
-//#define MOUSE_OFF   16    //Mouse Disable   A2  //zα2氏仕様
+#define RET_OK        0x75
+#define RET_OK_EXIT   0x76
+#define RET_D1_OK     0x77
+#define RET_D2A_OK    0x78
+#define RET_D2B_OK    0x79
+#define RET_D2S_OK    0x7A
+#define RET_ERROR     0x7B
 
-SoftwareSerial KBDSerial(KBD_RX,KBD_TX); // RX(KEYTxD/MSCTRL), TX(KEYRxD)
+#define MS_TX      14    // Mouse TX
+#define MS_RX      15    // Mouse RX
+
+SoftwareSerial MSSerial(MS_RX, MS_TX); // RX(KEYTxD/MSCTRL), TX(KEYRxD)
 
 #define LOBYTE(x) ((char*)(&(x)))[0]
 #define HIBYTE(x) ((char*)(&(x)))[1]
@@ -74,20 +56,39 @@ SoftwareSerial KBDSerial(KBD_RX,KBD_TX); // RX(KEYTxD/MSCTRL), TX(KEYRxD)
 boolean LeftButton = false;         // マウス左ボタン
 boolean MidButton = false;          // マウス真ん中ボタン
 boolean RightButton = false;        // マウス右ボタン
-byte dx;                            // マウスX軸
-byte dy;                            // マウスY軸
+int16_t dx;                            // マウスX軸
+int16_t dy;                            // マウスY軸
 uint8_t MSCTRL;
 uint8_t oldCTRL;
 byte MSDATA;
 
+volatile uint8_t usb_keycode = 0x00;
+volatile uint8_t x68_scancode = 0x00;
+volatile uint8_t config_mode = 0;
+volatile uint8_t state = 0;
+volatile uint8_t sel_layer = 0;
+
+volatile uint8_t prev_key = 0x00;
+volatile uint8_t oneshot_sc = 0x00;
+volatile uint8_t one_count = 0;
+
+
 // キーリピートの定義
-#define REPEATTIME      5   // キーを押し続けて、REP_INTERVALxREPEATTIMEmsec後にリピート開始
-#define EMPTY           0   // リピート管理テーブルが空状態
-#define MAXKEYENTRY     6   // リピート管理テーブルサイズ
-//#define REP_INTERVAL    50 // リピート間隔
-uint8_t REP_INTERVAL = 50;  // リピート間隔
-uint8_t keyentry[MAXKEYENTRY];    // リピート管理テーブル
-uint8_t repeatWait[MAXKEYENTRY];  // リピート開始待ち管理テーブル
+volatile uint8_t repeat_delay[16] = { 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170 };
+volatile uint8_t repeat_rate[16] = { 3, 4, 5, 8, 11, 16, 21, 28, 35, 44, 53, 64, 75, 87, 101, 116 };
+
+volatile uint8_t int_count = 0;
+
+volatile uint8_t delay_time = 50;
+volatile uint8_t repeat_time = 11;
+volatile uint8_t need_send = 0;
+
+volatile uint8_t data_1 = 0x00;
+volatile uint8_t data_2 = 0x00;
+
+uint8_t classType = 0;      
+uint8_t subClassType = 0;
+
 
 //-----------------------------------------------------------------------------
 
@@ -122,8 +123,9 @@ class MouseRptParser : public MouseReportParser {
 USB     Usb;
 USBHub  Hub(&Usb);
 
-BTD     Btd(&Usb);
-BTHID   bthid(&Btd);
+//BTD     Btd(&Usb);
+//BTHID   bthid(&Btd);
+
 //BTHID   bthid(&Btd, PAIR);
 //BTHID   bthid(&Btd, PAIR, "0000");
 
@@ -139,16 +141,18 @@ MouseRptParser MousePrs;
 
 //-----------------------------------------------------------------------------
 
-void MouseRptParser::OnMouseMove(MOUSEINFO *mi)
-{
-/*    Serial.print("dx=");
-    Serial.print(mi->dX, DEC);
-    Serial.print(" dy=");
-    Serial.println(mi->dY, DEC); */
-    dx = mi->dX;
-    dy = mi->dY;
+void MouseRptParser::OnMouseMove(MOUSEINFO *mi) {
 
+  // 前回のレポートからの差分が通知されてくる    
+  dx += mi->dX;
+  if (dx > 255) dx = 255;
+  if (dx < -255) dx = -255;
+  
+  dy += mi->dY;
+  if (dy > 255) dy = 255;
+  if (dy < -255) dy = -255;
 };
+
 void MouseRptParser::OnLeftButtonUp (MOUSEINFO *mi) {
 //    Serial.println("L Butt Up");
     LeftButton = false;
@@ -177,74 +181,74 @@ void MouseRptParser::OnMiddleButtonDown (MOUSEINFO *mi) {
 //--------------------------------------------------------------------------
 
 
-uint8_t classType = 0;      
-uint8_t subClassType = 0;
+//
+// キーが押された
+//
+void send_make(uint8_t key) {
 
-//
-// keyboard 1 byte send (software serial)
-//
-void byte_send(char code) {
-  KBDSerial.listen();
-  KBDSerial.write(code);
+  prev_key = key;
 
-#if MYDEBUG
-  Serial.println(code);
-#endif
-}
-
-//
-// リピート管理テーブルのクリア
-//
-void claerKeyEntry() {
- for (uint8_t i=0; i <MAXKEYENTRY; i++)
-    keyentry[i] = EMPTY;
-}
-
-//
-// リピート管理テーブルにキーを追加
-//
-void addKey(uint8_t key) {
- for (uint8_t i=0; i <MAXKEYENTRY; i++) {
-  if (keyentry[i] == EMPTY) {
-    keyentry[i] = key;  
-    repeatWait[i] = REPEATTIME;
-    break;
+  if (key == EEPROM.read(1)) {
+    sel_layer = 1;
+    return;
+  } else if (key == EEPROM.read(2)) {
+    return;
   }
- }
-}
 
-//
-// リピート管理テーブルからキーを削除
-//
-void delKey(uint8_t key) {
- for (uint8_t i=0; i <MAXKEYENTRY; i++) {
-  if (keyentry[i] == key) {
-    keyentry[i] = EMPTY;
-    break;
+  if (sel_layer == 0) {
+    x68_scancode = EEPROM.read(key);
+  } else {
+    x68_scancode = EEPROM.read(key + 256);
   }
- }  
-}
-
-// リピート処理(タイマー割り込み処理から呼ばれる)
-void sendRepeat() {
-  // HID Usage ID から X68000 スキャンコード に変換
-  uint8_t key;
-  uint8_t code;
   
-  for (uint8_t i=0; i < MAXKEYENTRY; i++) {
-    if (keyentry[i] != EMPTY) {
-      key = keyentry[i]; 
-      if (repeatWait[i] == 0) {
-        code = pgm_read_byte(&(keytable[key]));
-//        Serial.print(F("keytable="));Serial.print(key,HEX);Serial.print(F(" code=")); Serial.println(code,HEX);
-        byte_send(code);
-    } else {
-        repeatWait[i]--;          
-      }
-    }
-  }
+  Serial.write(x68_scancode);
+  int_count = delay_time;
 }
 
+//
+// キーが開放された
+//
+void send_break(uint8_t key) {
+
+  if (key == EEPROM.read(1)) {
+    sel_layer = 0;
+
+    // 
+    if (prev_key == key){
+      // 直前に押されたキーが自分自身の場合はまずmakeを即時で送信
+      uint8_t _sc = EEPROM.read(key);
+      Serial.write(_sc);
+
+      // 30ms後にbreakも飛ぶように設定
+      one_count = 3;
+      oneshot_sc = _sc | 0x80;
+      x68_scancode = 0;
+    }
+    
+    return;
+  } else if (key == EEPROM.read(2)) {
+    sel_layer = (sel_layer == 0 ? 1 : 0);
+    return;
+  }
+  
+  if (sel_layer == 0) {
+    x68_scancode = EEPROM.read(key);
+  } else {
+    x68_scancode = EEPROM.read(key + 256);
+  }
+
+  Serial.write(x68_scancode | 0x80);
+  x68_scancode = 0;
+}
+
+
+// タイマー割り込み処理
+void sendRepeat() {
+  if (int_count > 0) int_count--;
+  if (one_count > 0) one_count--;
+}
+
+  
 //
 // ロックキー（NumLock/CAPSLock/ScrollLock)ハンドラ
 //
@@ -252,20 +256,11 @@ uint8_t KbdRptParser::HandleLockingKeys(USBHID *hid, uint8_t key) {
   if (classType == USB_CLASS_WIRELESS_CTRL) {
     uint8_t old_keys = kbdLockingKeys.bLeds;  
     switch (key) {
-//      case UHS_HID_BOOT_KEY_NUM_LOCK:
-//        kbdLockingKeys.kbdLeds.bmNumLock = ~kbdLockingKeys.kbdLeds.bmNumLock;
-//        break;
       case UHS_HID_BOOT_KEY_CAPS_LOCK:
         kbdLockingKeys.kbdLeds.bmCapsLock = ~kbdLockingKeys.kbdLeds.bmCapsLock;
         break;
-//      case UHS_HID_BOOT_KEY_SCROLL_LOCK:
-//        kbdLockingKeys.kbdLeds.bmScrollLock = ~kbdLockingKeys.kbdLeds.bmScrollLock;
-//        break;
     }
-    if (old_keys != kbdLockingKeys.bLeds && hid) {
-      BTHID *pBTHID = reinterpret_cast<BTHID *> (hid); // A cast the other way around is done in BTHID.cpp
-      pBTHID->setLeds(kbdLockingKeys.bLeds); // Update the LEDs on the keyboard
-    }
+    
   } else {
     return KeyboardReportParser::HandleLockingKeys(hid, key);   
   }
@@ -280,19 +275,7 @@ uint8_t KbdRptParser::HandleLockingKeys(USBHID *hid, uint8_t key) {
 //  key : HID Usage ID 
 //
 void KbdRptParser::OnKeyDown(uint8_t mod, uint8_t key) {
-  MsTimer2::stop();
-
-  uint8_t code;
-  code = pgm_read_byte(&(keytable[key]));
-  if (code == 0x00)
-    return;
-
-#if MYDEBUG == 1
-  Serial.print(F("keytable="));Serial.print(key,HEX);Serial.print(F(" code=")); Serial.println(code,HEX);
-#endif
-  byte_send(code);
-  addKey(key);
-  MsTimer2::start();
+  send_make(key);
 }
 
 //
@@ -302,19 +285,7 @@ void KbdRptParser::OnKeyDown(uint8_t mod, uint8_t key) {
 //  key : HID Usage ID 
 //
 void KbdRptParser::OnKeyUp(uint8_t mod, uint8_t key) {
-  MsTimer2::stop();
-  uint8_t code;
-  code = pgm_read_byte(&(keytable[key]));
-  if (code == 0x00)
-    return;
-
-  code |= 0x80; // 離すときは 1000 0000 にビットを立てる
-#if MYDEBUG
-  Serial.print(F("keytable="));Serial.print(key,HEX);Serial.print(F(" code=")); Serial.println(code,HEX);
-#endif
-  byte_send(code);
-  delKey(key);
-  MsTimer2::start();
+    send_break(key);
 }
 
 //
@@ -334,89 +305,73 @@ void KbdRptParser::OnControlKeysChanged(uint8_t before, uint8_t after) {
 
   // 左Ctrlキー
   if (beforeMod.bmLeftCtrl != afterMod.bmLeftCtrl) {
-    code = 0x71;
     if (afterMod.bmLeftCtrl) {
-      byte_send(code);      // 左Ctrlキーを押した
+      send_make(0xE0);      // 左Ctrlキーを押した
     } else {
-      code |= 0x80;
-      byte_send(code);      // 左Ctrlキーを離した
+      send_break(0xE0);      // 左Ctrlキーを離した
     } 
   }
 
   // 左Shiftキー
   if (beforeMod.bmLeftShift != afterMod.bmLeftShift) {
-    code = 0x70;
     if (afterMod.bmLeftShift) {
-      byte_send(code);      // 左Shiftキーを押した
+      send_make(0xE1);      // 左Shiftキーを押した
     } else {
-      code |= 0x80;
-      byte_send(code);      // 左Shiftキーを離した
+      send_break(0xE1);      // 左Shiftキーを離した
     }
   }
 
   // 左Altキー(XF1)
   if (beforeMod.bmLeftAlt != afterMod.bmLeftAlt) {
-    code = 0x55;
     if (afterMod.bmLeftAlt) {
-      byte_send(code);      // 左Altキーを押した
+      send_make(0xE2);      // 左Altキーを押した
     } else {
-      code |= 0x80;
-      byte_send(code);      // 左Altキーを離した
+      send_break(0xE2);      // 左Altキーを離した
     }
   }
 
   // 左GUIキー(Winキー)(ひらがな)
   if (beforeMod.bmLeftGUI != afterMod.bmLeftGUI) {
-    code = 0x5f;
     if (afterMod.bmLeftGUI) {
-      byte_send(code);      // 左Winキーを押した
+      send_make(0xE3);      // 左Altキーを押した
     } else {
-      code |= 0x80;
-      byte_send(code);      // 左Winキーを離した
+      send_break(0xE3);      // 左Altキーを離した
     }
   }
 
   // 右Ctrlキー(OPT.2)
   if (beforeMod.bmRightCtrl != afterMod.bmRightCtrl) {
-    code = 0x73;
     if (afterMod.bmRightCtrl) {
-      byte_send(code);      // 右Ctrlキーを押した
+      send_make(0xE4);      // 左Altキーを押した
     } else {
-      code |= 0x80;
-      byte_send(code);      // 右Ctrlキーを離した
-    } 
+      send_break(0xE4);      // 左Altキーを離した
+    }
   }
 
   // 右Shiftキー
   if (beforeMod.bmRightShift != afterMod.bmRightShift) {
-    code = 0x70;
     if (afterMod.bmRightShift) {
-      byte_send(code);      // 右Shiftキーを押した
+      send_make(0xE5);      // 左Altキーを押した
     } else {
-      code |= 0x80;
-      byte_send(code);      // 右Shiftキーを離した
+      send_break(0xE5);      // 左Altキーを離した
     }
   }
 
   // 右Altキー(XF5)
   if (beforeMod.bmRightAlt != afterMod.bmRightAlt) {
-    code = 0x59;
     if (afterMod.bmRightAlt) {
-      byte_send(code);      // 右Altキーを押した
+      send_make(0xE6);      // 左Altキーを押した
     } else {
-      code |= 0x80;
-      byte_send(code);      // 右Altキーを離した
+      send_break(0xE6);      // 左Altキーを離した
     }
   }
 
   // 右GUIキー(opt1)
   if (beforeMod.bmRightGUI != afterMod.bmRightGUI) {
-    code = 0x72;
     if (afterMod.bmRightGUI) {
-      byte_send(code);      // 右Winキーを押した
+      send_make(0xE7);      // 左Altキーを押した
     } else {
-      code |= 0x80;
-      byte_send(code);      // 右Winキーを離した
+      send_break(0xE7);      // 左Altキーを離した
     }
   }
 }
@@ -459,46 +414,32 @@ uint8_t getIntClass(byte& intclass, byte& intSubClass ) {
   return ( flgFound );
 }
 
-void rep_timer() {
-  MsTimer2::set(REP_INTERVAL, sendRepeat); 
-  MsTimer2::start();
-}
-
 //
 // マウスデータ送信部分
 //
 void mouse_send() {
-  if (MSCTRL == 64 && oldCTRL == 65) {  //highからlowになった
-#if MYDEBUG == 3
-    Serial.print(F("MSCTRL = ")); Serial.print(MSCTRL);
-    Serial.print(F(" LEFT  = ")); Serial.print(LeftButton); Serial.print(F(" RIGHT = ")); Serial.print(RightButton);
-    Serial.print(F(" dX = ")); Serial.print(dx,HEX); Serial.print(F(" 2dX = ")); Serial.print(dx,BIN);
-    Serial.print(F(" dX = ")); Serial.print(dx>>1,HEX); Serial.print(F(" 2dX = ")); Serial.print(dx>>1,BIN);
-    Serial.print(F(" dY = ")); Serial.print(dy,HEX); Serial.print(F(" 2dY = ")); Serial.print(dy,BIN);
-    Serial.print(F(" dY = ")); Serial.print(dy>>1,HEX); Serial.print(F(" 2dY = ")); Serial.println(dy>>1,BIN);
-#endif
 
-//    delay抜いても何故か動いてます
-//      delayMicroseconds(700);
-    MSDATA = B00000000;
+    MSDATA = 0;
     if (LeftButton) MSDATA |= B00000001;    // 左クリック
     if (RightButton) MSDATA |= B00000010;   // 右クリック
-//      Serial.print(F("MSDATA = ")); Serial.println(MSDATA);
-    Serial.write(MSDATA);
-    Serial.write(dx);
-    dx=0; // 一度送信したらリセット
-    Serial.write(dy);
-    dy=0; // 一度送信したらリセット
-  }
-  if (MSCTRL == 64 || MSCTRL == 65) {
-    oldCTRL = MSCTRL;   //MSCTRLデータのみ保存（他のデータも流れてくるかもしれないので）
-  }
+
+    MSSerial.write(MSDATA);
+    delayMicroseconds(250);
+    
+    MSSerial.write((int8_t)(dx/2));
+    delayMicroseconds(250);
+    dx = 0; // 一度送信したらリセット
+ 
+    MSSerial.write((int8_t)(dy/2));
+    delayMicroseconds(250);
+    dy = 0; // 一度送信したらリセット
+
 }
 
 
 void setup() {
 
-  KBDSerial.begin(2400);
+  MSSerial.begin(4800);
 
 #if MYDEBUG
   Serial.println("Self Test OK.");
@@ -512,20 +453,9 @@ void setup() {
     while (1); // Halt    
   }
   delay( 200 );
-  pinMode(MOUSE_OFF, INPUT_PULLUP); // Inputモードでプルアップ抵抗を有効
 
-#if MYDEBUG
-  Serial.println(digitalRead(MOUSE_OFF));
-#endif
+  Serial.begin(2400);  //MSDATA送信用
 
-    if(digitalRead(MOUSE_OFF) == HIGH) {
-      Serial.begin(4800,SERIAL_8N2);  //MSDATA送信用
-    }
-
-//  Serial.println(F("BT Start."));
-//  bthid.SetReportParser(KEYBOARD_PARSER_ID, &keyboardPrs);
-  bthid.SetReportParser(MOUSE_PARSER_ID, &MousePrs);
-  bthid.setProtocolMode(USB_HID_BOOT_PROTOCOL); // Boot Protocol Mode
 
 #if MYDEBUG
   Serial.println(F("HID Start."));
@@ -536,37 +466,109 @@ void setup() {
   HidKeyboard.SetReportParser(0, &keyboardPrs);
   HidMouse.SetReportParser(0, &MousePrs);
 
-  claerKeyEntry();
-//  MsTimer2::set(REP_INTERVAL, sendRepeat); 
-//  MsTimer2::start();
-  rep_timer(); 
+  config_mode = 0;
 
-#if MYDEBUG
-  Serial.println(F("Setup End."));
-#endif
+  MsTimer2::set(10, sendRepeat); 
+  MsTimer2::start();
+
 }
+
+void config_map(uint8_t data) {
+
+  uint8_t ret, _layer, _sc, j;
+
+  switch(state) {
+    case 0:
+      state = 1;
+      data_1 = data;
+      Serial.write(RET_D1_OK);
+      break;
+    default:
+      state = 0;
+      data_2 = data;
+      
+      if (data_1 <= 0x03) {
+        EEPROM.write(data_1, data_2);
+        Serial.write(RET_D2S_OK);
+      } else {
+        if ((data_1 == 0x7F) && (data_2 == 0x7F)) {
+          // 7F7Fは終了コマンド
+          Serial.write(RET_OK_EXIT);
+          config_mode = 0;
+        } else {
+          _layer = (data_2 & 0x80);
+          _sc = (data_2 & 0x7F);
+          if (_layer == 0) {
+            // Layer0
+            EEPROM.write(data_1, _sc);
+            Serial.write(RET_D2A_OK);
+          } else {
+            // Layer1
+            EEPROM.write(data_1 + 256, _sc);
+            Serial.write(RET_D2B_OK);
+          }
+        }
+      }
+      break;
+  }
+}
+
 
 void loop() {
 
-
-  
   Usb.Task();
 
-  KBDSerial.listen();
-  if (KBDSerial.available()) {  //データなしは-1が流れてる
-    MSCTRL = KBDSerial.read();
+  //KBDSerial.listen();
+  if (Serial.available()) {  //データなしは-1が流れてる
 
-    if(digitalRead(MOUSE_OFF) == HIGH) {
-      mouse_send();       //マウス送信
+    MSCTRL = Serial.read();
+
+    if (config_mode != 0) {
+      config_map(MSCTRL);
+      return;
     }
 
-    // キーリピート開始時間（未実装）
-    if (MSCTRL>>4 == 0x06) {
-    }
-    // キーリピート間隔（実機と異なる）
-    if (MSCTRL>>4 == 0x07) {
-      REP_INTERVAL = 30+(MSCTRL&B00001111)*(MSCTRL&B00001111)*5;
-      rep_timer();
+    switch (MSCTRL >> 6) {
+      case B00:
+        // TV Control
+        if (MSCTRL == 0x0D) {
+          state = 0;
+          config_mode = 1;
+          Serial.write(RET_OK);
+        }
+        break;
+      case B01:
+        //
+        if ((MSCTRL >> 4) == B0110) {
+          // Delay time
+          delay_time = repeat_delay[MSCTRL & 0x0F];
+        }
+        if ((MSCTRL >> 4) == B0111) {
+          // Repeat time
+          repeat_time = repeat_rate[MSCTRL & 0x0F];
+        } 
+        if ((MSCTRL >> 3) == B01000) {
+          // MS Control H -> L
+          if ((MSCTRL & 1) == 0) mouse_send();
+
+          // 流れてくるデータを確認する限り、不定bitは必ず0、つまり
+          // 0x40(H->L)か0x41(L->H)しか送信されてこないような気がする
+        }
+        break;
+      case B10:
+      case B11:
+        // LED Control
+        break;
     }
   }
+
+  if (int_count == 0) {
+    if (x68_scancode != 0x00) Serial.write(x68_scancode);
+    int_count = repeat_time;
+  }
+
+  if (one_count == 0) {
+    if (oneshot_sc != 0x00) Serial.write(oneshot_sc);
+  }
+  
 }
